@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::{self, File};
+use std::hash::Hash;
 use std::io::{self, BufRead, Read, Seek, Write};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -208,7 +209,7 @@ fn download_plox_rules(rules_dir: &PathBuf) {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialOrd)]
 pub struct PluginData {
     pub name: String,
     pub size: u64,
@@ -216,6 +217,20 @@ pub struct PluginData {
     pub description: Option<String>,
     pub version: Option<semver::Version>,
     pub masters: Option<Vec<(String, u64)>>,
+}
+
+impl PartialEq for PluginData {
+    fn eq(&self, other: &Self) -> bool {
+        self.size == other.size && self.name == other.name && self.version == other.version
+    }
+}
+impl Eq for PluginData {}
+impl Hash for PluginData {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.version.hash(state);
+        self.size.hash(state);
+    }
 }
 
 impl PluginData {
@@ -937,7 +952,6 @@ pub fn wild_contains(list: &[String], str: &String) -> Option<Vec<String>> {
             log::error!("Could not construct wildcard pattern for {}", str);
             return None;
         }
-
         if results.is_empty() {
             return None;
         }
@@ -951,6 +965,7 @@ pub fn wild_contains(list: &[String], str: &String) -> Option<Vec<String>> {
 
     None
 }
+
 
 /// Checks if the list contains the str
 pub fn wild_contains_data(list: &[PluginData], str: &str) -> Option<Vec<PluginData>> {
