@@ -14,6 +14,7 @@ pub mod expressions;
 pub mod parser;
 pub mod rules;
 pub mod sorter;
+pub mod partial_order;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use filetime::set_file_mtime;
