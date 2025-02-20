@@ -317,7 +317,7 @@ pub fn get_graph_data(
         let lower_case = plugin_data.name.to_lowercase();
 
         index_dict.insert(lower_case.clone(), i);
-        index_dict_rev.insert(i, lower_case.clone());
+        index_dict_rev.insert(i, lower_case);
 
         plugin_map.insert(i, plugin_data.to_owned());
     }

@@ -1,6 +1,8 @@
 use std::{collections::{HashMap, HashSet}, rc::Rc};
 
-use crate::rules::EOrderRule;
+use log::debug;
+
+use crate::{rules::EOrderRule, sorter::GraphData};
 
 
 
@@ -44,76 +46,32 @@ impl std::ops::IndexMut<(usize, usize)> for ZetaMatrix {
 pub const CMP_MAX_ITERS: usize = 100;
 
 
-pub fn sort_order_rules(rules: &[EOrderRule]) -> Vec<Rc<str>> {
-	// set of all distinct mod names
-	let distinct_mod_names: HashSet<Rc<str>> = 
-		rules.iter()
-		.flat_map(|r| match r {
-			EOrderRule::Order(order) => &order.names,
-			EOrderRule::NearStart(near_start) =>  &near_start.names,
-			EOrderRule::NearEnd(near_end) =>  &near_end.names,
-		})
-		.map(|s| Rc::from(s.to_lowercase()))
-		.collect();
+pub fn sort(data: &GraphData) -> Vec<&str> {
 
-	// vector of all distinct mod names
-	let mod_names: Box<[Rc<str>]> = distinct_mod_names.into_iter().collect();
-	// map that gives the index given a mod name.
-	// from now on, we will pretty much only interact with things by index, until we create the sorted 
-	// vector at the very end
-	let mut index_by_mod_name: HashMap<Rc<str>, usize> = HashMap::with_capacity(mod_names.len());
-
-	for (i, s) in mod_names.iter().enumerate() {
-		// let s = std::ptr::from_ref(s.as_ref())
-		// let s: *const str = &**s;
-		index_by_mod_name.insert(Rc::clone(s), i);
-	}
-
-	let mut zeta_mat =  ZetaMatrix::new(mod_names.len());
+	let num_nodes = data.index_dict.len();
+	let mut zeta_mat = ZetaMatrix::new(num_nodes);
 	
+	let edges = data.edges.as_slice();
 
-
-	for rule in rules.iter() {
-		// TODO: make this sorting algorithm care about near start and near end rules.
-		let names = match rule {
-			EOrderRule::Order(order) => &order.names,
-			EOrderRule::NearStart(near_start) =>  &near_start.names,
-			EOrderRule::NearEnd(near_end) =>  &near_end.names,
-		};
-		// the indices of all mods in this `rule`
-		let mut indices = Vec::with_capacity(names.len());
-		for name in names {
-			indices.push(*index_by_mod_name.get(name.as_str()).unwrap());
-		}
-		// all of this transitivity information would be added later on,
-		// so we could skip the double for loop here and instead only add immediate successors,
-		// but there is a lot more information density here, so doing the double `for` loop would result in
-		// fewer iterations later on.
-		for (i, &a) in indices.iter().enumerate() {
-			for &b in &indices[(i+ 1)..] {
-				zeta_mat[(a, b)] = true;
-			}
-		}
+	for &e in edges {
+		zeta_mat[e] = true;
 	}
 
 
-	// fill out the transitivity information for the matrix
-	// there is probably a way to do this without a quadruple `for` loop. oh well!
-	// besides, we aren't doing any expensive computations in the loop so it's probably okay for now.
-	// this outer loop should only run at most 15-20 times
+	// Fill out the transitivity information for the matrix.
+	// There is probably a way to do this without a quadruple `for` loop. Oh well!
+	// Besides, we aren't doing any expensive computations in the loop so it's probably okay for now.
+	// This outer loop should only run at most 15-20 times
 	for _ in 0 .. CMP_MAX_ITERS {
 		let mut made_a_change = false;
 		// iterate over all pairs
-		for a in 0 .. zeta_mat.n {
-			for b in 0 .. zeta_mat.n {
-				// the graph should be fairly sparse, so this should skip a lot of stuff
+		for a in 0 .. num_nodes {
+			for b in 0 .. num_nodes {
 				if !zeta_mat[(a,b)] { continue; }
 
-				for c in 0..zeta_mat.n {
-					if zeta_mat[(b,c)] {
-						if !zeta_mat[(a,c)] {
-							made_a_change = true;
-						}
+				for c in 0 .. num_nodes {
+					if zeta_mat[(b,c)] && !zeta_mat[(a,c)] {
+						made_a_change = true;
 						zeta_mat[(a,c)] = true;
 					}
 				}
@@ -124,71 +82,97 @@ pub fn sort_order_rules(rules: &[EOrderRule]) -> Vec<Rc<str>> {
 		}
 	}
 
-	let n = zeta_mat.n;
-	let mut equivalence_classes: Vec<Box<[usize]>> = Vec::with_capacity(n);
+	let mut equivalence_classes: Vec<Box<[usize]>> = Vec::with_capacity(num_nodes);
+	let mut reps: Vec<usize> = Vec::with_capacity(num_nodes);
 	// hashset to prevent us from adding the same element twice
 	let mut seen_elems: HashSet<usize> = HashSet::new();
-	for a in 0 .. n {
+	for a in 0 .. num_nodes {
+		// already added this node? then skip it
 		if seen_elems.contains(&a) { 
 			continue; 
 		}
 		let mut cls = vec![a];
-		// seen_elems.insert(a);
-
-		for b in (0.. a - 1).chain(a+1..n) {
-			if zeta_mat[(a,b)] {
-				// seen_elems.insert(b);
+		// for all b != a
+		for b in (0.. a-1).chain(a+1 .. num_nodes) {
+			// if a <= b and b <= a
+			// i.e., if `a` and `b` lie in a cycle.
+			if zeta_mat[(a,b)] && zeta_mat[(b,a)] {
 				cls.push(b);
 			}
 		}
+		// mark every item in this equivalence class as seen
 		seen_elems.extend(&cls);
 		equivalence_classes.push(cls.into_boxed_slice());
-
+		// mark `a` as the chosen representative.
+		reps.push(a);
 	}
-	// let equivalence_classes = equivalence_classes.into_boxed_slice();
 
 	// now, do a topological sort on the equivalence classes.
 	// fml
 
 	// reset the collection of seen elements so we can reuse it without canibalizing the order matrix.
-	seen_elems = HashSet::new();
+	seen_elems.clear();
 
-	let mut zeta_matrix_clone = zeta_mat.clone();
 	
-	// do a shittier topological sort since i didnt a non-transitive matrix.
-	// runtime performance could probably be improved by also storing a non-transitive matrix.
+	// NOTE: Now that we have constructed the collection of representatives, we can can canibalize the zeta matrix.
+	// We'll use the zeta matrix to do a shittier topological sort.
+	// We can't do a proper topological sort since the zeta matrix stores transitivity information.
 
-	let mut sorted_mods = Vec::with_capacity(n);
+	// Runtime performance could possibly be improved by also storing a non-transitive matrix.
+	// However, we can't use the initial set of edges for this, so we'd have to make our own.
 
-	while sorted_mods.len() < zeta_mat.n {
-		for i in 0 .. equivalence_classes.len() {
+	#[cfg(debug_assertions)]
+	{
+		debug!("Printing cycles...");
+		for (cls_num, cls) in equivalence_classes.iter().enumerate() {
+			let mut cycle_mod_names = vec![];
+			for i in cls {
+				cycle_mod_names.push(data.index_dict_rev[i].as_str());
+			}
+			debug!("\t{cls_num}: {cycle_mod_names:?}");
+		}
+	}
+
+	let mut sorted_mods = Vec::with_capacity(num_nodes);
+
+	let mut initial_reps = vec![];
+
+	'outer: for (i, &a_rep) in reps.iter().enumerate() {
+		// check if a is initial, if not, then bail
+		for &b_rep in reps[.. i-1].iter().chain(&reps[i+1 ..]) {
+			if zeta_mat[(b_rep, a_rep)] {
+				continue 'outer;
+			}
+		}
+		initial_reps.push(a_rep);
+	}
+	
+
+	while sorted_mods.len() < num_nodes {
+		'outer: for (i, &a_rep) in reps.iter().enumerate() {
 			// we're only dealing with a representative of each equivalence class.
 			// this is because everything in `equivalence_classes[i]` will lie in the same cycle,
 			// so they will all follow the exact same order rules.
-			let a_rep = equivalence_classes[i][0];
 			if seen_elems.contains(&a_rep) {
 				continue;
 			}
 
 			// check if a is initial, if not, then bail
-			let mut a_is_initial = true;
-			for j in (0 ..  i-1).chain(i+1 .. equivalence_classes.len()) {
-				let b_rep = equivalence_classes[j][0];
-				if zeta_matrix_clone[(b_rep, a_rep)] {
-					a_is_initial = false;
-					break
+			for &b_rep in reps[.. i-1].iter().chain(&reps[i+1 ..]) {
+				if zeta_mat[(b_rep, a_rep)] {
+					continue 'outer;
 				}
 			}
-			if !a_is_initial {
-				continue;
+			// delete all edges from `a`
+			for &b_rep in reps[.. i-1].iter().chain(&reps[i+1 ..]) {
+				zeta_mat[(a_rep, b_rep)] = false;
 			}
-			for j in (0 ..  i-1).chain(i+1 .. equivalence_classes.len()) {
-				let b_rep = equivalence_classes[j][0];
-				zeta_matrix_clone[(a_rep, b_rep)] = false;
-			}
+			// mark `a` as seen.
 			seen_elems.insert(a_rep);
+
+			// add in all elements from this equivalence class
 			for idx in &equivalence_classes[i] {
-				sorted_mods.push(Rc::clone(&mod_names[*idx]));
+				sorted_mods.push(data.index_dict_rev[idx].as_str());
 			}
 			// sorted_equiv_classes.push(equivalence_classes[i].clone());
 		}
