@@ -1,8 +1,8 @@
-use std::{collections::{HashMap, HashSet}, rc::Rc};
+use std::{collections::HashSet, rc::Rc};
 
 use log::debug;
 
-use crate::{rules::EOrderRule, sorter::GraphData};
+use crate::sorter::GraphData;
 
 
 
@@ -45,167 +45,167 @@ impl std::ops::IndexMut<(usize, usize)> for ZetaMatrix {
 
 pub const CMP_MAX_ITERS: usize = 100;
 
-
+/// Sorts graph data using topological sort, even if it contains cycles.
+/// 
+/// ...
+/// 
+/// At least, that's the goal. This is still a work in progress.
+/// In particular, this function does not yet care about `NearStart` and `NearEnd` rules.
+/// But this could be extended to handle those directly in one fell swoop. (I think.)
 pub fn sort(data: &GraphData) -> Vec<&str> {
 
 	let num_nodes = data.index_dict.len();
-	let mut zeta_mat = ZetaMatrix::new(num_nodes);
+	let mut zeta = ZetaMatrix::new(num_nodes);
 	
 	let edges = data.edges.as_slice();
 
 	for &e in edges {
-		zeta_mat[e] = true;
+		zeta[e] = true;
 	}
 
 
 	// Fill out the transitivity information for the matrix.
 	// There is probably a way to do this without a quadruple `for` loop. Oh well!
 	// Besides, we aren't doing any expensive computations in the loop so it's probably okay for now.
-	// This outer loop should only run at most 15-20 times
-	for _ in 0 .. CMP_MAX_ITERS {
+	// If the longest chain/cycle has length `m`, then this outer loop is guaranteed to run fewer than `m` times.
+	// Since a bunch of transitivity information was already given in `data.edges`, it seems likely that this loop
+	// will end up running fewer than 20 times.
+	for _ in 1 ..= CMP_MAX_ITERS {
 		let mut made_a_change = false;
 		// iterate over all pairs
 		for a in 0 .. num_nodes {
 			for b in 0 .. num_nodes {
-				if !zeta_mat[(a,b)] { continue; }
+				if !zeta[(a,b)] { continue; }
+				// past this point we know `a <= b`.
 
 				for c in 0 .. num_nodes {
-					if zeta_mat[(b,c)] && !zeta_mat[(a,c)] {
+					// if `b <= c`, and if we haven't yet recorded that `a <= c`
+					if zeta[(b,c)] && !zeta[(a,c)] {
+						// add in the transitivity information for `a <= c`, and 
+						// record that we've made a change.
 						made_a_change = true;
-						zeta_mat[(a,c)] = true;
+						zeta[(a,c)] = true;
 					}
 				}
 			}
 		}
+		// if we've gone through all triples and found no new information, we can exit the loop early.
 		if !made_a_change {
 			break;
 		}
 	}
-
-	let mut equivalence_classes: Vec<Box<[usize]>> = Vec::with_capacity(num_nodes);
-	let mut reps: Vec<usize> = Vec::with_capacity(num_nodes);
+	// Each equivalence class corresponds to a cycle in the graph.
+	// From now on, we'll be operating on the graph of equivalences classes.
+	// This graph will be acyclic, so we can do a topological sort on it.
+	// Using Rc makes it easier to do checks using pointer equality
+	let mut equivalence_classes: Vec<Rc<[usize]>> = Vec::with_capacity(num_nodes);
 	// hashset to prevent us from adding the same element twice
 	let mut seen_elems: HashSet<usize> = HashSet::new();
+
 	for a in 0 .. num_nodes {
 		// already added this node? then skip it
 		if seen_elems.contains(&a) { 
 			continue; 
 		}
+		// `cls` consists of at least `a`.
 		let mut cls = vec![a];
 		// for all b != a
 		for b in (0.. a-1).chain(a+1 .. num_nodes) {
 			// if a <= b and b <= a
 			// i.e., if `a` and `b` lie in a cycle.
-			if zeta_mat[(a,b)] && zeta_mat[(b,a)] {
+			if zeta[(a,b)] && zeta[(b,a)] {
 				cls.push(b);
 			}
 		}
 		// mark every item in this equivalence class as seen
 		seen_elems.extend(&cls);
-		equivalence_classes.push(cls.into_boxed_slice());
-		// mark `a` as the chosen representative.
-		reps.push(a);
+		equivalence_classes.push(Rc::from(cls));
 	}
 
-	// now, do a topological sort on the equivalence classes.
-	// fml
+	// Now that we have identified and grouped all the cycles, we'll perform a topological sort 
+	//		on the graph formed by the equivalence classes (i.e. cycles).
+	// Notice that this is possible because the graph formed by the equivalences classes is guaranteed to be acyclic.
+	// Ater topologically sorting the equivalence classes, we can expand out each equivalence class to obtain
+	// 		an ordering on all the mods. The things within each equivalence class will be in a random order, 
+	//		but they will all be sorted relative to all other cycles.
 
-	// reset the collection of seen elements so we can reuse it without canibalizing the order matrix.
-	seen_elems.clear();
 
-	
-	// NOTE: Now that we have constructed the collection of representatives, we can can canibalize the zeta matrix.
-	// We'll use the zeta matrix to do a shittier topological sort.
-	// We can't do a proper topological sort since the zeta matrix stores transitivity information.
+	// NOTE: We'll be performing the topological sort by identifying each equivalence class with its first element
+	//		(i.e., the element at index `0`).
+	// This means that we no longer care about any information stored the rows/columns of the zeta matrix that do not 
+	//		correspond to the first element of some equivalence class.
 
-	// Runtime performance could possibly be improved by also storing a non-transitive matrix.
-	// However, we can't use the initial set of edges for this, so we'd have to make our own.
-
+	// if debugging, print out all the cycles.
 	#[cfg(debug_assertions)]
 	{
 		debug!("Printing cycles...");
-		for (cls_num, cls) in equivalence_classes.iter().enumerate() {
-			let mut cycle_mod_names = vec![];
-			for i in cls {
-				cycle_mod_names.push(data.index_dict_rev[i].as_str());
-			}
-			debug!("\t{cls_num}: {cycle_mod_names:?}");
+		for (i, cls) in equivalence_classes.iter().enumerate() {
+
+			let cycle_mod_names: Vec<&str> = cls
+				.iter()
+				.map(|a| data.index_dict_rev[a].as_str())
+				.collect();
+
+			debug!("\t{i}: {cycle_mod_names:?}");
 		}
+	}
+
+
+	// all of the initial equivalence classes
+	// (recall that an element is "iniital" if there is no edge to that element.)
+	let mut initial_classes = Vec::new();
+
+	// initialize the initial representatives and kill the symmetry of zeta.
+	// killing the symmetry of zeta means we dont have to do fancy index math to only compare unequal indices
+
+	for a_cls in &equivalence_classes {
+		let a_rep = a_cls[0];
+		zeta[(a_rep, a_rep)] = false;
+		// check if `a_cls` is initial, if not, then bail
+		if equivalence_classes.iter().any(|b_cls| zeta[(b_cls[0], a_rep)]) {
+			continue;
+		}
+		initial_classes.push(Rc::clone(&a_cls));
 	}
 
 	let mut sorted_mods = Vec::with_capacity(num_nodes);
 
-	let mut initial_rep_indices = Vec::new();
-
-	// initialize initial representatives and kill the symmetry of zeta.
-	'outer: for (i, &a_rep) in reps.iter().enumerate() {
-		zeta_mat[(a_rep, a_rep)] = false;
-		// check if a is initial, if not, then bail
-		for &b_rep in &reps {
-			if zeta_mat[(b_rep, a_rep)] {
-				continue 'outer;
-			}
-		}
-		initial_rep_indices.push(i);
-	}
-
-	while let Some(i) = initial_rep_indices.pop() {
+	while let Some(a_cls) = initial_classes.pop() {
 		// add all equivalent elements
-		for idx in &equivalence_classes[i] {
-			sorted_mods.push(data.index_dict_rev[idx].as_str());
+		for a in a_cls.iter() {
+			sorted_mods.push(data.index_dict_rev[a].as_str());
 		}
-		let a_rep = reps[i];
-		seen_elems.insert(a_rep);
+		let a_rep = a_cls[0];
+
+		// remove `a_cls` from the vector of all equivalence classes
+		equivalence_classes.remove(
+			equivalence_classes.iter()
+				.position(|cls| *cls == a_cls)
+				.expect("Error: {a_cls:?} was not present in equivalences classes while iterating.")
+		);
 
 		// delete all edges from `a`, and then add initial objects
-		'outer: for &b_rep in &reps {
-			if seen_elems.contains(&b_rep) { continue; }
-			zeta_mat[(a_rep, b_rep)] = false;
-
-			for &c_rep in &reps {
-				if seen_elems.contains(&c_rep) { continue; }
-				if zeta_mat[(c_rep, b_rep)] { continue 'outer; }
-				
-				initial_rep_indices.insert(c_rep);
-
-			}
-
-			
-		}
-
-	}
-	while sorted_mods.len() < num_nodes {
-		'outer: for (i, &a_rep) in reps.iter().enumerate() {
-			// we're only dealing with a representative of each equivalence class.
-			// this is because everything in `equivalence_classes[i]` will lie in the same cycle,
-			// so they will all follow the exact same order rules.
-			if seen_elems.contains(&a_rep) {
+		for b_cls in &equivalence_classes {
+			let b_rep = b_cls[0];
+			// if these equivalence classes aren't comparable, move on
+			if !zeta[(a_rep, b_rep)] {
 				continue;
 			}
+			zeta[(a_rep, b_rep)] = false;
 
-			// check if a is initial, if not, then bail
-			for &b_rep in reps[.. i-1].iter().chain(&reps[i+1 ..]) {
-				if zeta_mat[(b_rep, a_rep)] {
-					continue 'outer;
-				}
+			// if `b` is already an initial class, skip
+			if initial_classes.contains(b_cls) {
+				continue;
 			}
-			// delete all edges from `a`
-			for &b_rep in reps[.. i-1].iter().chain(&reps[i+1 ..]) {
-				zeta_mat[(a_rep, b_rep)] = false;
+			// check if `b_cls` is initial, if not, then bail
+			if equivalence_classes.iter().any(|c_cls| zeta[(c_cls[0], b_rep)]) {
+				continue;
 			}
-			// mark `a` as seen.
-			seen_elems.insert(a_rep);
-
-			// add in all elements from this equivalence class
-			for idx in &equivalence_classes[i] {
-				sorted_mods.push(data.index_dict_rev[idx].as_str());
-			}
-			// sorted_equiv_classes.push(equivalence_classes[i].clone());
+			initial_classes.push(Rc::clone(&b_cls));
 		}
+
 	}
 
 	sorted_mods
-
-
 }
 
