@@ -135,19 +135,45 @@ pub fn sort(data: &GraphData) -> Vec<&str> {
 
 	let mut sorted_mods = Vec::with_capacity(num_nodes);
 
-	let mut initial_reps = vec![];
+	let mut initial_rep_indices = Vec::new();
 
+	// initialize initial representatives and kill the symmetry of zeta.
 	'outer: for (i, &a_rep) in reps.iter().enumerate() {
+		zeta_mat[(a_rep, a_rep)] = false;
 		// check if a is initial, if not, then bail
-		for &b_rep in reps[.. i-1].iter().chain(&reps[i+1 ..]) {
+		for &b_rep in &reps {
 			if zeta_mat[(b_rep, a_rep)] {
 				continue 'outer;
 			}
 		}
-		initial_reps.push(a_rep);
+		initial_rep_indices.push(i);
 	}
-	
 
+	while let Some(i) = initial_rep_indices.pop() {
+		// add all equivalent elements
+		for idx in &equivalence_classes[i] {
+			sorted_mods.push(data.index_dict_rev[idx].as_str());
+		}
+		let a_rep = reps[i];
+		seen_elems.insert(a_rep);
+
+		// delete all edges from `a`, and then add initial objects
+		'outer: for &b_rep in &reps {
+			if seen_elems.contains(&b_rep) { continue; }
+			zeta_mat[(a_rep, b_rep)] = false;
+
+			for &c_rep in &reps {
+				if seen_elems.contains(&c_rep) { continue; }
+				if zeta_mat[(c_rep, b_rep)] { continue 'outer; }
+				
+				initial_rep_indices.insert(c_rep);
+
+			}
+
+			
+		}
+
+	}
 	while sorted_mods.len() < num_nodes {
 		'outer: for (i, &a_rep) in reps.iter().enumerate() {
 			// we're only dealing with a representative of each equivalence class.
